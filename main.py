@@ -1,5 +1,6 @@
 import os
 import random
+import hashlib
 from datetime import datetime, date
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -14,10 +15,26 @@ import asyncio
 # === INIT ===
 init_db()
 
-# Ensure last_sent column exists
-def ensure_last_sent_column():
+# Ensure required columns exist (safe: uses IF NOT EXISTS)
+def ensure_columns():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     cur = conn.cursor()
+    cur.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS user_id BIGINT;
+    """)
+    cur.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS username TEXT;
+    """)
+    cur.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS first_name TEXT;
+    """)
+    cur.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS birthday DATE;
+    """)
     cur.execute("""
         ALTER TABLE users
         ADD COLUMN IF NOT EXISTS last_sent DATE;
@@ -26,7 +43,7 @@ def ensure_last_sent_column():
     cur.close()
     conn.close()
 
-ensure_last_sent_column()
+ensure_columns()
 
 # Validate token
 if not BOT_TOKEN:
@@ -89,54 +106,17 @@ async def add_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Optional name and username
         name = context.args[1] if len(context.args) > 1 else update.message.from_user.first_name
-        username = context.args[2] if len(context.args) > 2 else update.message.from_user.username
+        username = context.args[2].lstrip("@") if len(context.args) > 2 else update.message.from_user.username
 
-        # Always assign a valid user_id
-        if len(context.args) <= 2:
-            user_id = update.message.from_user.id
+        # Determine user_id
+        if len(context.args) > 2:
+            # Generate a stable pseudo-ID from username (same hash for same user)
+            user_id = int(hashlib.sha256(username.encode()).hexdigest(), 16) % (10**10)
         else:
-            # unique positive integer for other users
-            user_id = int(datetime.now().timestamp() * 1000)
+            # Use actual Telegram user ID
+            user_id = update.message.from_user.id
 
-        with get_conn() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO users (user_id, username, first_name, birthday)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (user_id)
-                DO UPDATE SET birthday = EXCLUDED.birthday,
-                              first_name = EXCLUDED.first_name,
-                              username = EXCLUDED.username;
-            """, (user_id, username, name, date_str))
-            conn.commit()
-
-        await update.message.reply_text(f"✅ Birthday for {name} ({date_str}) has been saved!")
-
-        # Check immediately if birthday is today
-        if birthday_date == date.today():
-            await send_birthday_message(context.application, {'user_id': user_id, 'username': username, 'first_name': name})
-
-    except ValueError:
-        await update.message.reply_text("⚠️ Invalid date format. Use YYYY-MM-DD.")
-
-    if update.effective_chat.type != "private":
-        return
-
-    if not context.args:
-        await update.message.reply_text("⚠️ Please use: /addbirthday YYYY-MM-DD [name] [username]")
-        return
-
-    try:
-        date_str = context.args[0]
-        birthday_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-
-        # Optional name and username
-        name = context.args[1] if len(context.args) > 1 else update.message.from_user.first_name
-        username = context.args[2] if len(context.args) > 2 else update.message.from_user.username
-
-        # Assign user_id: real user_id for self, negative unique ID for others
-        user_id = update.message.from_user.id if len(context.args) <= 2 else -int(datetime.now().timestamp())
-
+        # Insert or update
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -153,44 +133,11 @@ async def add_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Immediate check if birthday is today
         if birthday_date == date.today():
-            await send_birthday_message(context.application, {'user_id': user_id, 'username': username, 'first_name': name})
-
-    except ValueError:
-        await update.message.reply_text("⚠️ Invalid date format. Use YYYY-MM-DD.")
-
-    if update.effective_chat.type != "private":
-        return
-
-    if not context.args:
-        await update.message.reply_text("⚠️ Please use: /addbirthday YYYY-MM-DD [name] [username]")
-        return
-
-    try:
-        date_str = context.args[0]
-        birthday_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-
-        # Optional name and username
-        name = context.args[1] if len(context.args) > 1 else update.message.from_user.first_name
-        username = context.args[2] if len(context.args) > 2 else update.message.from_user.username
-        user_id = update.message.from_user.id if len(context.args) <= 2 else None
-
-        with get_conn() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO users (user_id, username, first_name, birthday)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (user_id)
-                DO UPDATE SET birthday = EXCLUDED.birthday,
-                              first_name = EXCLUDED.first_name,
-                              username = EXCLUDED.username;
-            """, (user_id, username, name, date_str))
-            conn.commit()
-
-        await update.message.reply_text(f"✅ Birthday for {name} ({date_str}) has been saved!")
-
-        # Immediate check if birthday is today
-        if birthday_date == date.today():
-            await send_birthday_message(context.application, {'user_id': user_id, 'username': username, 'first_name': name})
+            await send_birthday_message(context.application, {
+                'user_id': user_id,
+                'username': username,
+                'first_name': name
+            })
 
     except ValueError:
         await update.message.reply_text("⚠️ Invalid date format. Use YYYY-MM-DD.")
@@ -203,7 +150,7 @@ async def my_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         cur.execute("SELECT birthday FROM users WHERE user_id=%s", (user.id,))
         result = cur.fetchone()
-    if result and result['birthday']:
+    if result and result.get('birthday'):
         await update.message.reply_text(f"📅 Your registered birthday: {result['birthday']}")
     else:
         await update.message.reply_text("❌ You haven’t registered your birthday yet.\nUse /addbirthday YYYY-MM-DD")
@@ -220,32 +167,38 @@ async def list_birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = "🎉 *Birthday List:*\n\n"
     for p in people:
-        uname = f"@{p['username']}" if p['username'] else p['first_name']
-        msg += f"🎂 {p['first_name']} ({uname}) – {p['birthday']}\n"
+        uname = f"@{p.get('username')}" if p.get('username') else p.get('first_name') or "Unknown"
+        msg += f"🎂 {p.get('first_name') or uname} ({uname}) – {p.get('birthday')}\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 # === BIRTHDAY CHECK FUNCTION ===
 async def send_birthday_message(app, user):
+    # Use user_id for last_sent checks and updates
+    user_id = user.get('user_id')
     today = date.today()
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT last_sent FROM users WHERE first_name=%s AND username=%s", (user['first_name'], user.get('username')))
+        if user_id is not None:
+            cur.execute("SELECT last_sent FROM users WHERE user_id=%s", (user_id,))
+        else:
+            # Fallback to first_name+username if user_id missing
+            cur.execute("SELECT last_sent FROM users WHERE first_name=%s AND username=%s", (user.get('first_name'), user.get('username')))
         result = cur.fetchone()
-        if result and result['last_sent'] == today:
+        if result and result.get('last_sent') == today:
             return
 
     verse = random.choice(VERSES)
     text_template = random.choice(MESSAGES)
-    name_tag = f"{user['first_name']} (@{user['username']})" if user.get('username') else user['first_name']
+    name_tag = f"{user.get('first_name')} (@{user.get('username')})" if user.get('username') else user.get('first_name') or "Friend"
 
     msg = (
-        f"╔════════════════╗\n"
+        f"╔════════════════╗╔════════════════╗╔════════════════╗\n"
         f"🎉 *Happy Birthday, {name_tag}!* 🎉\n"
         f"May your day be filled with joy, love, and laughter 💖\n"
         f"📖 {verse}\n"
         f"🎁 Wishing you an amazing year ahead! ✨\n"
         f"🍰🎂🎉 HBD {name_tag}! 🎉🎂🍰\n"
-        f"╚════════════════╝"
+        f"╚════════════════╝╚════════════════╝╚════════════════╝"
     )
 
     try:
@@ -253,7 +206,10 @@ async def send_birthday_message(app, user):
         print(f"✅ Sent birthday message for {name_tag}")
         with get_conn() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE users SET last_sent=%s WHERE first_name=%s AND username=%s", (today, user['first_name'], user.get('username')))
+            if user_id is not None:
+                cur.execute("UPDATE users SET last_sent=%s WHERE user_id=%s", (today, user_id))
+            else:
+                cur.execute("UPDATE users SET last_sent=%s WHERE first_name=%s AND username=%s", (today, user.get('first_name'), user.get('username')))
             conn.commit()
     except Exception as e:
         print(f"❌ Error sending birthday message for {name_tag}: {e}")
@@ -262,9 +218,11 @@ async def check_birthdays(app):
     today_str = datetime.now().strftime("%m-%d")
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT first_name, username, user_id FROM users WHERE to_char(birthday, 'MM-DD')=%s", (today_str,))
+        # Select user_id, first_name, username to prefer user_id usage
+        cur.execute("SELECT user_id, first_name, username FROM users WHERE to_char(birthday, 'MM-DD')=%s", (today_str,))
         people = cur.fetchall()
     for user in people:
+        # Ensure we have dict-like access
         await send_birthday_message(app, user)
 
 # === MANUAL TEST COMMAND ===

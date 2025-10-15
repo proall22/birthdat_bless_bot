@@ -69,20 +69,8 @@ def _create_database_if_missing(dsn: str):
 def init_db():
     conn = get_connection()
     cur = conn.cursor()
-    # Check if the last_sent column exists and add it if it doesn't
-    cur.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1
-                FROM information_schema.columns 
-                WHERE table_name='users' AND column_name='last_sent'
-            ) THEN
-                ALTER TABLE users ADD COLUMN last_sent DATE;
-            END IF;
-        END $$;
-    """
-    )
+
+    # Create table first (safe if it already exists)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -91,9 +79,15 @@ def init_db():
             first_name TEXT,
             birthday DATE,
             last_sent DATE
-            
         );
     """)
+
+    # Ensure last_sent column exists — use ALTER TABLE IF EXISTS + ADD COLUMN IF NOT EXISTS for extra safety
+    cur.execute("""
+        ALTER TABLE IF EXISTS users
+        ADD COLUMN IF NOT EXISTS last_sent DATE;
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
