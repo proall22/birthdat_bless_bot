@@ -146,12 +146,13 @@ async def add_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Birthday for {name} ({date_str}) has been saved!")
 
         # Immediate check if birthday is today
-        if birthday_date == date.today():
-            await send_birthday_message(context.application, {
-                'user_id': user_id,
-                'username': username,
-                'first_name': name
-            })
+        today = date.today()
+        if birthday_date.month == today.month and birthday_date.day == today.day:
+         await send_birthday_message(context.application, {
+        'user_id': user_id,
+        'username': username,
+        'first_name': name
+         })
 
     except ValueError:
         await update.message.reply_text("⚠️ Invalid date format. Use YYYY-MM-DD.")
