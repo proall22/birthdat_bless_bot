@@ -11,6 +11,20 @@ from config import BOT_TOKEN, DATABASE_URL, GROUP_CHAT_ID
 from db import init_db
 import sys
 import asyncio
+from flask import Flask
+import threading
+import requests
+
+async def self_ping(url: str):
+    """Pings itself every few minutes to keep the instance alive."""
+    while True:
+        try:
+            print("🔁 Self-pinging to stay awake...")
+            await asyncio.to_thread(requests.get, url)
+        except Exception as e:
+            print(f"⚠️ Keep-alive ping failed: {e}")
+        await asyncio.sleep(56)  # every 5 minutes
+
 
 # === INIT ===
 init_db()
@@ -232,28 +246,52 @@ async def test_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_birthdays(context.application)
     await update.message.reply_text("✅ Test birthday check triggered!")
 
+# === KEEP ALIVE SECTION ===
+app_flask = Flask('keep_alive')
+
+@app_flask.route('/')
+def home():
+    return "✅ Birthday Bless Bot is alive!"
+
+def run_flask():
+    # Run Flask server on port 8080 (for Render, Replit, Railway)
+    app_flask.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    """Start Flask in a background thread"""
+    thread = threading.Thread(target=run_flask)
+    thread.start()
+
+
 # === MAIN FUNCTION ===
 def main():
+    # Start the keep-alive Flask server
+    keep_alive()
+
+    # Build the Telegram bot
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Register handlers
+    # Register commands (same as before)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addbirthday", add_birthday))
     app.add_handler(CommandHandler("mybirthday", my_birthday))
     app.add_handler(CommandHandler("listbirthdays", list_birthdays))
     app.add_handler(CommandHandler("testbirthdays", test_birthday))
 
-    # Scheduler for multiple checks (8 AM, 12 PM, 4 PM, 8 PM)
+    # Scheduler (same as before)
     scheduler = BackgroundScheduler()
     for hour in [8, 12, 16, 20]:
         scheduler.add_job(lambda: app.create_task(check_birthdays(app)), 'cron', hour=hour)
     scheduler.start()
 
-    # Run once at startup
     async def on_startup(app):
         print("🧪 Running startup birthday check...")
         await check_birthdays(app)
         print("✅ Startup birthday check complete.")
+        # Start the self-ping coroutine
+        base_url = os.getenv("KEEP_ALIVE_URL")
+        if base_url:
+            asyncio.create_task(self_ping(base_url))
 
     app.post_init = on_startup
 
